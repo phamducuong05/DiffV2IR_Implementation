@@ -116,6 +116,11 @@ from transformers.modeling_outputs import (
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
 
+try:  # transformers >= 4.27 ships the generation package; older used generation_utils
+    from transformers.generation import GenerationMixin
+except ImportError:
+    from transformers.generation_utils import GenerationMixin
+
 
 logger = logging.get_logger(__name__)
 
@@ -879,7 +884,10 @@ class BertModel(BertPreTrainedModel):
 
 
 
-class BertLMHeadModel(BertPreTrainedModel):
+class BertLMHeadModel(BertPreTrainedModel, GenerationMixin):
+    # transformers >= 4.50 no longer inherits GenerationMixin from
+    # PreTrainedModel, so `generate` must be mixed in explicitly here.
+    _supports_generation = True
 
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
     _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
@@ -916,7 +924,8 @@ class BertLMHeadModel(BertPreTrainedModel):
         return_logits=False,            
         is_decoder=True,
         reduction='mean',
-        mode='multimodal', 
+        mode='multimodal',
+        **kwargs,  # absorb extra generation kwargs (e.g. cache_position) from newer transformers
     ):
         r"""
         encoder_hidden_states  (:obj:`torch.FloatTensor` of shape :obj:`(batch_size, sequence_length, hidden_size)`, `optional`):
@@ -1017,6 +1026,7 @@ class BertLMHeadModel(BertPreTrainedModel):
             "encoder_hidden_states": model_kwargs.get("encoder_hidden_states", None),
             "encoder_attention_mask": model_kwargs.get("encoder_attention_mask", None),
             "is_decoder": True,
+            "use_cache": False,
         }
 
     def _reorder_cache(self, past, beam_idx):
