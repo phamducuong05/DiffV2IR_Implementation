@@ -155,6 +155,23 @@ def _pil_to_tensor(pil: Image.Image) -> torch.Tensor:
     return torch.tensor(np.array(pil)).float().permute(2, 0, 1).unsqueeze(0) / 255.0
 
 
+def _kornia_ssim(a, b) -> float:
+    """Mean SSIM, tolerant of kornia 0.6/0.7 vs 1.x API differences.
+
+    kornia <= 0.7: ``ssim(..., reduction="mean")`` returns the per-image mean.
+    kornia >= 1.0 : ``reduction`` was dropped and ``ssim`` returns the full
+    SSIM map ``(B,C,H,W)``, so the mean must be taken explicitly.
+    """
+    import kornia
+    try:
+        out = kornia.metrics.ssim(a, b, window_size=11, reduction="mean")
+    except TypeError:
+        out = kornia.metrics.ssim(a, b, window_size=11)
+    if isinstance(out, (tuple, list)):
+        out = out[0]
+    return float(out.mean())
+
+
 def compute_sample_metrics(clip_sim, lpips_fn, rgb_img, gen_img, gt_img,
                            caption, device) -> dict[str, float]:
     """Per-image CLIP (4) + SSIM + PSNR + LPIPS metrics vs GT IR."""
@@ -168,7 +185,7 @@ def compute_sample_metrics(clip_sim, lpips_fn, rgb_img, gen_img, gt_img,
 
     m = {}
     m["psnr"] = float(kornia.metrics.psnr(gen_t, gt_t, max_val=1.0))
-    m["ssim"] = float(kornia.metrics.ssim(gen_t, gt_t, window_size=11, reduction="mean"))
+    m["ssim"] = _kornia_ssim(gen_t, gt_t)
     m["lpips"] = float(lpips_fn(gen_t * 2 - 1, gt_t * 2 - 1))  # LPIPS expects [-1,1]
 
     text_in = [caption]
