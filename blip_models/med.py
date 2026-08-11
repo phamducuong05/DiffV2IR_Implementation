@@ -22,49 +22,85 @@ from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 
 from transformers.activations import ACT2FN
-try:  # transformers >= 5.0 removed file_utils and apply_chunking_to_forward
+
+# transformers >= 5.0 removed `file_utils` and moved/removed several modeling
+# helpers (apply_chunking_to_forward, find_pruneable_heads_and_indices,
+# prune_linear_layer). Import only the stable symbols from transformers and
+# define the helpers locally with the legacy positional signature BLIP calls,
+# so the same code runs on transformers 4.x and 5.x.
+try:  # transformers < 5.0
     from transformers.file_utils import ModelOutput
-    from transformers.modeling_utils import (
-        PreTrainedModel,
-        apply_chunking_to_forward,
-        find_pruneable_heads_and_indices,
-        prune_linear_layer,
-    )
-except ImportError:
+except ImportError:  # transformers >= 5.0
     from transformers.modeling_outputs import ModelOutput
-    from transformers.modeling_utils import (
-        PreTrainedModel,
-        find_pruneable_heads_and_indices,
-        prune_linear_layer,
+
+try:
+    from transformers.modeling_utils import PreTrainedModel
+except ImportError:  # future-proofing for a possible module rename
+    from transformers.model_utils import PreTrainedModel
+
+
+def split_tensor_into_size(tensor, split_size, dim=0):
+    if tensor.shape[dim] % split_size != 0:
+        raise ValueError(
+            f"`tensor.shape[{dim}]` ({tensor.shape[dim]}) must be divisible by `split_size` ({split_size})."
+        )
+    num_chunks = tensor.shape[dim] // split_size
+    return torch.split(tensor, num_chunks, dim=dim)
+
+
+def _chunked_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
+    input_tensors = [
+        tensor_chunk
+        for tensor in input_tensors
+        for tensor_chunk in split_tensor_into_size(tensor, chunk_size, chunk_dim)
+    ]
+    outputs = [forward_fn(*args_chunk) for args_chunk in zip(*input_tensors)]
+    return torch.cat(outputs, dim=chunk_dim)
+
+
+def apply_chunking_to_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
+    if chunk_size == 0:
+        return forward_fn(*input_tensors)
+    if chunk_size > 0:
+        return _chunked_forward(forward_fn, chunk_size, chunk_dim, *input_tensors)
+    raise RuntimeError(
+        f"chunk_size={chunk_size} was expected to be a positive integer or zero."
     )
 
-    import inspect
 
-    def split_tensor_into_size(tensor, split_size, dim=0):
-        if tensor.shape[dim] % split_size != 0:
-            raise ValueError(
-                f"`tensor.shape[{dim}]` ({tensor.shape[dim]}) must be divisible by `split_size` ({split_size})."
-            )
-        num_chunks = tensor.shape[dim] // split_size
-        return torch.split(tensor, num_chunks, dim=dim)
+def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+    """Pruned-heads helper, mirroring transformers.modeling_utils (pre-5.0).
 
-    def _chunked_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
-        input_tensors = [
-            tensor_chunk
-            for tensor in input_tensors
-            for tensor_chunk in split_tensor_into_size(tensor, chunk_size, chunk_dim)
-        ]
-        outputs = [forward_fn(*args_chunk) for args_chunk in zip(*input_tensors)]
-        return torch.cat(outputs, dim=chunk_dim)
+    Returns (pruned_heads, index): the set of pruned head indices and the
+    weight indices (into each linear layer) that remain.
+    """
+    keys_to_remove = set()
+    pruned_heads = set()
+    for head in heads:
+        if head in already_pruned_heads:
+            continue
+        keys_to_remove.update(head * head_size + offset for offset in range(head_size))
+        pruned_heads.add(head)
+    index = torch.tensor(
+        [i for i in range(n_heads * head_size) if i not in keys_to_remove],
+        dtype=torch.long,
+    )
+    return pruned_heads, index
 
-    def apply_chunking_to_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
-        if chunk_size == 0:
-            return forward_fn(*input_tensors)
-        if chunk_size > 0:
-            return _chunked_forward(forward_fn, chunk_size, chunk_dim, *input_tensors)
-        raise RuntimeError(
-            f"chunk_size={chunk_size} was expected to be a positive integer or zero."
-        )
+
+def prune_linear_layer(layer, index, dim=0):
+    """Prune an nn.Linear along dim, mirroring transformers.modeling_utils (pre-5.0)."""
+    index = index.to(layer.weight.device)
+    if dim == 0:
+        new_layer = nn.Linear(layer.in_features, len(index), bias=layer.bias is not None)
+    elif dim == 1:
+        new_layer = nn.Linear(len(index), layer.out_features, bias=layer.bias is not None)
+    else:
+        raise ValueError(f"Invalid dim {dim}, should be 0 or 1")
+    new_layer.weight.data = layer.weight.data.index_select(dim, index).clone().contiguous()
+    if layer.bias is not None:
+        new_layer.bias.data = layer.bias.data.index_select(dim, index).clone().contiguous()
+    return new_layer
 
 from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
