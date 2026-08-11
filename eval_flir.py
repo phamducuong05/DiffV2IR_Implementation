@@ -329,6 +329,8 @@ def main():
     stems = load_split_stems(align_root, args.split)
     if not stems:
         raise RuntimeError(f"No stems found in align_{args.split}.txt under {align_root}")
+    print(f"Resolved dataset root: {align_root}")
+    print(f"Split: align_{args.split}.txt -> {len(stems)} stems")
     if args.num_samples > 0:
         stems = stems[:args.num_samples]
     print(f"[0/1] Loading weights")

@@ -86,19 +86,21 @@ python infer.py --ckpt your_ckpt --input input_folder --output output_folder
 `eval_flir.py` runs RGB -> IR inference on a FLIR-aligned dataset and reports
 CLIP + SSIM + PSNR + LPIPS against the ground-truth IR.
 
-Dataset layout (FLIR ADAS 1.3 aligned — split files at the root):
+Dataset layout (FLIR ADAS 1.3 aligned). Both layouts are auto-detected:
 
 ```
-<dataset>/
-├── JPEGImages/          # FLIR_XXXXX_RGB.jpg (input), FLIR_XXXXX_PreviewData.jpeg (GT IR)
-├── Annotations/         # FLIR_XXXXX_PreviewData.xml
-├── AnnotatedImages/     # ignored (RGB with drawn boxes)
-├── align_train.txt
-└── align_validation.txt # one stem per line (with or without _PreviewData suffix)
+<dataset>/                        <dataset>/
+├── align/                        ├── JPEGImages/      # FLIR_XXXXX_RGB.jpg, FLIR_XXXXX_PreviewData.jpeg
+│   ├── JPEGImages/               ├── Annotations/     # FLIR_XXXXX_PreviewData.xml
+│   ├── Annotations/              ├── AnnotatedImages/
+│   ├── align_train.txt           ├── align_train.txt
+│   └── align_validation.txt      └── align_validation.txt
+└── ... (or JPEGImages etc.)
 ```
 
-Pass `--dataset` as the folder that contains `JPEGImages/` directly (a nested
-`align/` subdir is also auto-detected), and pick the split file with
+Split files are one stem per line (with or without the `_PreviewData` suffix).
+Pass `--dataset` as the folder that contains the `align/` subdir (the nested
+`align/` is auto-detected), and pick the split file with
 `--split train|validation` (default `validation`).
 
 ```bash
