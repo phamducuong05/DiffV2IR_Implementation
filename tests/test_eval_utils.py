@@ -60,20 +60,47 @@ def test_resolve_align_root_detects_align(tmp_path):
     assert resolve_align_root(tmp_path / "align") == tmp_path / "align"
 
 
-def test_load_split_stems(tmp_path):
-    split_dir = tmp_path / "ImageSets" / "Main"
-    split_dir.mkdir(parents=True)
-    split = split_dir / "align_validation.txt"
+def test_load_split_stems_root_file(tmp_path):
+    # FLIR ADAS 1.3 aligned: split files live at the dataset root
+    split = tmp_path / "align_validation.txt"
     split.write_text("FLIR_00001_PreviewData\n\nFLIR_00002_PreviewData\n")
     assert load_split_stems(tmp_path, "validation") == [
         "FLIR_00001_PreviewData", "FLIR_00002_PreviewData"]
 
 
-def test_stem_to_paths(tmp_path):
+def test_load_split_stems_imagenet_fallback(tmp_path):
+    # older layout: ImageSets/Main/ is still accepted
+    split_dir = tmp_path / "ImageSets" / "Main"
+    split_dir.mkdir(parents=True)
+    (split_dir / "align_train.txt").write_text("FLIR_00001_PreviewData\n")
+    assert load_split_stems(tmp_path, "train") == ["FLIR_00001_PreviewData"]
+
+
+def test_load_split_stems_missing_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_split_stems(tmp_path, "validation")
+
+
+def test_stem_to_paths_defaults(tmp_path):
     p = stem_to_paths(tmp_path, "FLIR_00001_PreviewData")
     assert p["rgb"] == tmp_path / "JPEGImages" / "FLIR_00001_RGB.jpg"
     assert p["ir"] == tmp_path / "JPEGImages" / "FLIR_00001_PreviewData.jpeg"
     assert p["ann"] == tmp_path / "Annotations" / "FLIR_00001_PreviewData.xml"
+
+
+def test_stem_to_paths_probes_real_extension(tmp_path):
+    jpg = tmp_path / "JPEGImages"
+    ann = tmp_path / "Annotations"
+    jpg.mkdir()
+    ann.mkdir()
+    # IR stored as .jpg and stem without _PreviewData suffix
+    (jpg / "FLIR_00001_PreviewData.jpg").write_bytes(b"ir")
+    (jpg / "FLIR_00001_RGB.png").write_bytes(b"rgb")
+    (ann / "FLIR_00001_PreviewData.xml").write_bytes(b"xml")
+    p = stem_to_paths(tmp_path, "FLIR_00001")
+    assert p["rgb"] == jpg / "FLIR_00001_RGB.png"
+    assert p["ir"] == jpg / "FLIR_00001_PreviewData.jpg"
+    assert p["ann"] == ann / "FLIR_00001_PreviewData.xml"
 
 
 def test_resolve_or_download_correct_size_no_download(tmp_path):

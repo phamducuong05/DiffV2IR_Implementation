@@ -292,7 +292,7 @@ def main():
     align_root = resolve_align_root(args.dataset)
     stems = load_split_stems(align_root, args.split)
     if not stems:
-        raise RuntimeError(f"No stems found in {align_root}/ImageSets/Main/align_{args.split}.txt")
+        raise RuntimeError(f"No stems found in align_{args.split}.txt under {align_root}")
     if args.num_samples > 0:
         stems = stems[:args.num_samples]
     print(f"[0/1] Loading weights")

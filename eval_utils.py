@@ -99,19 +99,51 @@ def resolve_align_root(path) -> Path:
 
 
 def load_split_stems(align_root: Path, split: str) -> list[str]:
-    """Read `ImageSets/Main/align_{split}.txt`; one stem per non-blank line."""
-    f = align_root / "ImageSets" / "Main" / f"align_{split}.txt"
-    with open(f) as fh:
-        return [line.strip() for line in fh if line.strip()]
+    """Read `align_{split}.txt` one stem per non-blank line.
+
+    FLIR ADAS 1.3 aligned keeps the split files at the dataset root
+    (`align_train.txt`, `align_validation.txt`); older layouts put them
+    under `ImageSets/Main/`. Both are supported, root-first.
+    """
+    align_root = Path(align_root)
+    candidates = [
+        align_root / f"align_{split}.txt",
+        align_root / "ImageSets" / "Main" / f"align_{split}.txt",
+    ]
+    for f in candidates:
+        if f.exists():
+            with open(f) as fh:
+                return [line.strip() for line in fh if line.strip()]
+    raise FileNotFoundError(
+        f"split file align_{split}.txt not found under {align_root} "
+        f"(tried {[str(c) for c in candidates]})")
+
+
+def _preview_base(stem: str) -> tuple[str, str]:
+    """Return (preview_stem, base_stem) whether or not stem carries the suffix."""
+    if stem.endswith("_PreviewData"):
+        return stem, stem[: -len("_PreviewData")]
+    return stem + "_PreviewData", stem
 
 
 def stem_to_paths(align_root: Path, stem: str) -> dict:
-    """Map a stem to FLIR file paths."""
-    base = stem.replace("_PreviewData", "")
+    """Map a split-file stem to FLIR file paths.
+
+    Tolerates stems with/without the `_PreviewData` suffix and probes the
+    real extension in `JPEGImages` (some FLIR builds use `.jpg`, others
+    `.jpeg`); falls back to the canonical names when nothing is found.
+    """
+    align_root = Path(align_root)
+    preview, base = _preview_base(stem)
+    jpg_dir = align_root / "JPEGImages"
+    ann_dir = align_root / "Annotations"
+    rgb_glob = sorted(jpg_dir.glob(f"{base}_RGB.*"))
+    ir_glob = sorted(jpg_dir.glob(f"{preview}.*"))
+    ann_glob = sorted(ann_dir.glob(f"{preview}.*"))
     return {
-        "rgb": align_root / "JPEGImages" / f"{base}_RGB.jpg",
-        "ir": align_root / "JPEGImages" / f"{stem}.jpeg",
-        "ann": align_root / "Annotations" / f"{stem}.xml",
+        "rgb": rgb_glob[0] if rgb_glob else jpg_dir / f"{base}_RGB.jpg",
+        "ir": ir_glob[0] if ir_glob else jpg_dir / f"{preview}.jpeg",
+        "ann": ann_glob[0] if ann_glob else ann_dir / f"{preview}.xml",
         "stem": stem,
     }
 
