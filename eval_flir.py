@@ -31,6 +31,7 @@ from eval_utils import (
     render_boxes_to_seg, resolve_align_root, resolve_or_download, stem_to_paths,
 )
 from metrics.clip_similarity import ClipSimilarity
+from metrics.fid import build_fid_inception, calculate_fid
 from model_utils import CFGDenoiser, load_blip_model, load_demo_image, load_model_from_config
 
 
@@ -61,6 +62,10 @@ def parse_args() -> argparse.Namespace:
                    help="Cast the diffusion model to fp16 (auto-enabled when CUDA is available).")
     p.add_argument("--no-fp16", dest="fp16", action="store_false",
                    help="Keep the diffusion model in fp32 (default on CPU).")
+    p.add_argument("--fid", dest="fid", action="store_true", default=None,
+                   help="Compute FID over the whole eval set (auto-enabled when CUDA is available).")
+    p.add_argument("--no-fid", dest="fid", action="store_false",
+                   help="Skip FID computation.")
     return p.parse_args()
 
 
@@ -155,6 +160,12 @@ def _pil_to_tensor(pil: Image.Image) -> torch.Tensor:
     return torch.tensor(np.array(pil)).float().permute(2, 0, 1).unsqueeze(0) / 255.0
 
 
+def _fid_preprocess(pil_img: Image.Image, device) -> torch.Tensor:
+    """(1,3,299,299) float in [-1,1] for InceptionV3, pytorch-fid style."""
+    img = pil_img.convert("RGB").resize((299, 299), Image.BILINEAR)
+    return (_pil_to_tensor(img).to(device) - 0.5) / 0.5
+
+
 def _kornia_ssim(a, b) -> float:
     """Mean SSIM, tolerant of kornia 0.6/0.7 vs 1.x API differences.
 
@@ -223,35 +234,39 @@ def _concat_horizontal(imgs, gap=6, bg=(255, 255, 255)):
     return canvas
 
 
-def build_visualization(samples, out_dir, n=20, include_seg=True):
-    """Write per-sample triplets (RGB | GT-IR | gen-IR [| seg]) + a vertical grid."""
+def build_visualization(samples, out_dir, n=20, include_seg=True, cols=4):
+    """Write per-sample pairs (RGB | GT-IR | gen-IR [| seg]) + one tiled grid."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = []
+    cells = []
     for s in samples[:n]:
         imgs = [s["rgb"], s["ir"], s["gen"]]
         if include_seg and s.get("seg") is not None:
             imgs.append(s["seg"])
         imgs = [Image.open(p).convert("RGB") for p in imgs]
-        # uniform height so rows align
+        # uniform height so the pair reads as one row
         h = 256
         imgs = [im.resize((int(im.size[0] * h / im.size[1]), h), Image.LANCZOS) for im in imgs]
         row = _concat_horizontal(imgs)
         row.save(out_dir / f"{Path(s['stem']).stem}_triplet.png")
-        rows.append(row)
-    if rows:
-        gap = 8
-        w = max(r.size[0] for r in rows)
-        grid_h = sum(r.size[1] for r in rows) + gap * (len(rows) - 1)
-        grid = Image.new("RGB", (w, grid_h), (255, 255, 255))
-        y = 0
-        for r in rows:
-            grid.paste(r, (0, y))
-            y += r.size[1] + gap
-        grid_path = out_dir / f"grid_{min(n, len(rows))}.png"
-        grid.save(grid_path)
-        return grid_path
-    return None
+        cells.append(row)
+    if not cells:
+        return None
+    # tiled grid: shrink each pair to a common width so a 4-col grid stays viewable
+    cell_w = 420
+    cells = [c.resize((cell_w, int(c.size[1] * cell_w / c.size[0])), Image.LANCZOS) for c in cells]
+    cell_h = cells[0].size[1]
+    gap = 8
+    cols = min(cols, len(cells))
+    n_rows = (len(cells) + cols - 1) // cols
+    grid = Image.new("RGB", (cols * cell_w + (cols - 1) * gap,
+                            n_rows * cell_h + (n_rows - 1) * gap), (255, 255, 255))
+    for i, c in enumerate(cells):
+        r, col = divmod(i, cols)
+        grid.paste(c, (col * (cell_w + gap), r * (cell_h + gap)))
+    grid_path = out_dir / f"grid_{min(n, len(cells))}.png"
+    grid.save(grid_path)
+    return grid_path
 
 
 def run_inference(args, model, model_wrap, model_wrap_cfg, null_token,
@@ -334,6 +349,18 @@ def main():
     import lpips
     lpips_fn = lpips.LPIPS(net="alex").to(device)
 
+    fid_model = None
+    fid_real, fid_fake = [], []
+    use_fid = (args.fid if args.fid is not None else torch.cuda.is_available())
+    use_fid = use_fid and torch.cuda.is_available()
+    if use_fid:
+        try:
+            fid_model = build_fid_inception(device)
+            print("FID Inception loaded.")
+        except Exception as exc:  # e.g. no torchvision / offline weights
+            print(f"WARNING: could not load FID Inception ({exc}); continuing without FID.")
+            fid_model = None
+
     sam_gen = None
     if args.seg_mode == "sam":
         sam_gen = load_sam(weights["sam"], args.sam_model_type, device, args.sam_points_per_side)
@@ -356,6 +383,9 @@ def main():
                                                  paths["rgb"], seg_path, out_path)
         gt_img = Image.open(paths["ir"]).convert("RGB")
         rgb_img = Image.open(paths["rgb"]).convert("RGB")
+        if fid_model is not None:
+            fid_real.append(fid_model(_fid_preprocess(gt_img, device)).cpu())
+            fid_fake.append(fid_model(_fid_preprocess(gen_img, device)).cpu())
         met = compute_sample_metrics(clip_sim, lpips_fn, rgb_img, gen_img, gt_img,
                                      caption, device)
         rec = {"stem": stem, "caption": caption, "prompt": prompt,
@@ -388,6 +418,24 @@ def main():
     print("==== Metrics (mean +/- std) ====")
     for k, v in summary["metrics"].items():
         print(f"  {k:20s} {v['mean']:.4f} +/- {v['std']:.4f}")
+
+    # dedicated metrics.json: FID + the three aggregate metrics over the whole set
+    fid_value = None
+    if fid_model is not None and fid_real:
+        real = torch.cat(fid_real).numpy()
+        fake = torch.cat(fid_fake).numpy()
+        fid_value = calculate_fid(real, fake)
+    metrics = {
+        "num_samples": len(scored),
+        "FID": fid_value,
+        "LPIPS": float(np.mean([r["lpips"] for r in scored])),
+        "PSNR": float(np.mean([r["psnr"] for r in scored])),
+        "SSIM": float(np.mean([r["ssim"] for r in scored])),
+    }
+    with open(Path(args.output) / "metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+    print(f"metrics.json: FID={fid_value if fid_value is None else f'{fid_value:.4f}'} "
+          f"LPIPS={metrics['LPIPS']:.4f} PSNR={metrics['PSNR']:.4f} SSIM={metrics['SSIM']:.4f}")
 
     # visualization: RGB | GT-IR | gen-IR [| seg]
     viz_dir = Path(args.output) / "visualization"

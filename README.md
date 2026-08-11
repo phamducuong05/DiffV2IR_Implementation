@@ -108,6 +108,21 @@ python eval_flir.py \
   --seg-mode sam             # sam | xml | zero | deeplab
 ```
 
+By default the **whole split is evaluated** (`--num-samples 0` = every stem in
+`align_validation.txt`), and **FID is computed over that full set** (GT IR vs
+generated IR) using torchvision InceptionV3 truncated at `Mixed_7c`. A
+dedicated `metrics.json` is written with `FID`, `LPIPS`, `PSNR`, `SSIM`; the
+per-sample CLIP/PSNR/SSIM/LPIPS means and stds go to `summary.json`.
+Visualization covers the first `--visualize` samples (default 20): one
+`*_triplet.png` per sample (`RGB | GT-IR | gen-IR [| seg]`) plus a single
+`grid_20.png` that tiles all 20. Pass `--no-fid` to skip FID, `--no-fp16` to
+keep the diffusion model in fp32.
+
+Smoke-test one image first with `--seg-mode zero --num-samples 1 --steps 10`,
+then run the full set with `--seg-mode sam --steps 50`. On a 15 GB T4 the
+diffusion model runs fp16, so a 512x512 image takes ~25-30 s at 50 steps —
+budget ~30-60 min per 100 validation images.
+
 Weights are auto-downloaded on first run (DiffV2IR FLIR.ckpt from HuggingFace,
 BLIP caption model, SAM ViT-B) into `--cache-dir ./weights`. To skip the ~9 GB
 download each run, upload the weights as a Kaggle dataset and pass
