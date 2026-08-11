@@ -22,9 +22,50 @@ from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 
 from transformers.activations import ACT2FN
-from transformers.file_utils import (
-    ModelOutput,
-)
+try:  # transformers >= 5.0 removed file_utils and apply_chunking_to_forward
+    from transformers.file_utils import ModelOutput
+    from transformers.modeling_utils import (
+        PreTrainedModel,
+        apply_chunking_to_forward,
+        find_pruneable_heads_and_indices,
+        prune_linear_layer,
+    )
+except ImportError:
+    from transformers.modeling_outputs import ModelOutput
+    from transformers.modeling_utils import (
+        PreTrainedModel,
+        find_pruneable_heads_and_indices,
+        prune_linear_layer,
+    )
+
+    import inspect
+
+    def split_tensor_into_size(tensor, split_size, dim=0):
+        if tensor.shape[dim] % split_size != 0:
+            raise ValueError(
+                f"`tensor.shape[{dim}]` ({tensor.shape[dim]}) must be divisible by `split_size` ({split_size})."
+            )
+        num_chunks = tensor.shape[dim] // split_size
+        return torch.split(tensor, num_chunks, dim=dim)
+
+    def _chunked_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
+        input_tensors = [
+            tensor_chunk
+            for tensor in input_tensors
+            for tensor_chunk in split_tensor_into_size(tensor, chunk_size, chunk_dim)
+        ]
+        outputs = [forward_fn(*args_chunk) for args_chunk in zip(*input_tensors)]
+        return torch.cat(outputs, dim=chunk_dim)
+
+    def apply_chunking_to_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
+        if chunk_size == 0:
+            return forward_fn(*input_tensors)
+        if chunk_size > 0:
+            return _chunked_forward(forward_fn, chunk_size, chunk_dim, *input_tensors)
+        raise RuntimeError(
+            f"chunk_size={chunk_size} was expected to be a positive integer or zero."
+        )
+
 from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
     BaseModelOutputWithPoolingAndCrossAttentions,
@@ -35,12 +76,6 @@ from transformers.modeling_outputs import (
     QuestionAnsweringModelOutput,
     SequenceClassifierOutput,
     TokenClassifierOutput,
-)
-from transformers.modeling_utils import (
-    PreTrainedModel,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
 )
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
