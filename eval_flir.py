@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sam-points-per-side", default=16, type=int)
     p.add_argument("--sam-max-size", default=512, type=int)
     p.add_argument("--dry-run", action="store_true", help="Process one sample then exit")
+    p.add_argument("--fp16", dest="fp16", action="store_true", default=None,
+                   help="Cast the diffusion model to fp16 (auto-enabled when CUDA is available).")
+    p.add_argument("--no-fp16", dest="fp16", action="store_false",
+                   help="Keep the diffusion model in fp32 (default on CPU).")
     return p.parse_args()
 
 
@@ -300,6 +304,11 @@ def main():
     config = OmegaConf.load(args.config)
     model = load_model_from_config(config, weights["ckpt"])
     model.eval().to(device)
+    use_fp16 = (args.fp16 if args.fp16 is not None else torch.cuda.is_available())
+    use_fp16 = use_fp16 and torch.cuda.is_available()
+    if use_fp16:
+        model.half()
+        print("Diffusion model cast to fp16.")
     model_wrap = K.external.CompVisDenoiser(model)
     model_wrap_cfg = CFGDenoiser(model_wrap)
     null_token = model.get_learned_conditioning([""])
@@ -337,6 +346,7 @@ def main():
                "ir": str(paths["ir"]), "seg": str(seg_path)}
         rec.update(met)
         records.append(rec)
+        torch.cuda.empty_cache()  # drop per-image fragmentation so a 15 GB T4 survives a long run
         if args.dry_run:
             break
 

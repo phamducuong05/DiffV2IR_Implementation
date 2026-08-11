@@ -37,6 +37,44 @@ class CFGDenoiser(nn.Module):
         return out_uncond + text_cfg_scale * (out_cond - out_img_cond) + image_cfg_scale * (out_img_cond - out_seg_cond) + seg_cfg_scale * (out_seg_cond - out_uncond)
 
 
+def _ema_weights_present(sd) -> bool:
+    """True if `sd` carries LitEma shadow buffers for the UNet.
+
+    LitEma registers buffers under flattened names (dots removed), so a loaded
+    EMA weight shows up as e.g. ``model_ema.diffusion_modelinput_blocks00weight``
+    (no dots after the ``model_ema.`` prefix). Dotted ``model_ema.*`` keys would
+    not have matched the flattened buffers on load and are ignored here.
+    """
+    return any(
+        k.startswith("model_ema.") and "." not in k[len("model_ema."):]
+        for k in sd
+    )
+
+
+def apply_ema_for_inference(model, sd) -> bool:
+    """Fold the checkpoint's EMA clone into the live denoiser, then drop it.
+
+    DiffV2IR's ``LatentDiffusion`` keeps a full ``LitEma`` clone of the UNet
+    (``model.model_ema``), and ``ema_scope()`` additionally deep-clones the live
+    params for the duration of each sampling call. At inference we only need one
+    copy of the weights: apply the EMA values once, disable ``ema_scope`` and
+    delete the clone, saving ~2x the UNet's memory. Returns True when EMA
+    weights were actually applied (else the base weights are kept).
+    """
+    if not (getattr(model, "use_ema", False) and hasattr(model, "model_ema")):
+        return False
+    if _ema_weights_present(sd):
+        model.model_ema.copy_to(model.model)
+        print("Applied EMA weights to denoiser; dropped EMA clone (saves ~1x UNet memory).")
+        applied = True
+    else:
+        print("Checkpoint has no model_ema weights; keeping base denoiser weights.")
+        applied = False
+    model.use_ema = False
+    del model.model_ema
+    return applied
+
+
 def load_model_from_config(config, ckpt, vae_ckpt=None, verbose=False):
     print(f"Loading model from {ckpt}")
     pl_sd = torch.load(ckpt, map_location="cpu")
@@ -58,6 +96,9 @@ def load_model_from_config(config, ckpt, vae_ckpt=None, verbose=False):
     if len(u) > 0 and verbose:
         print("unexpected keys:")
         print(u)
+    apply_ema_for_inference(model, sd)
+    # Free the ~8 GB checkpoint tensors now that the weights are in the model.
+    del pl_sd, sd
     return model
 
 
