@@ -251,7 +251,7 @@ def run_inference(args, model, model_wrap, model_wrap_cfg, null_token,
     input_seg = ImageOps.fit(input_seg, (new_w, new_h), method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
 
     # 3) sample
-    with torch.no_grad(), torch.autocast("cuda"), model.ema_scope():
+    with torch.no_grad(), torch.autocast(device), model.ema_scope():
         cond = {
             "c_crossattn": [model.get_learned_conditioning([prompt])],
             "c_concat1": [model.encode_first_stage(rearrange(
